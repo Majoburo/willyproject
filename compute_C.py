@@ -72,7 +72,7 @@ def image_stokes_I(obs):
         obs, prior, prior,
         data_term={"cphase": 1, "logcamp": 1},
         reg_term={"simple": 1, "flux": 100, "cm": 50},
-        maxit=300, ttype="direct",
+        maxit=300, ttype="nfft",
     )
     imgr.make_image_I(grads=True, show_updates=False)
     im = imgr.out_last().copy()
@@ -83,23 +83,23 @@ def image_stokes_I(obs):
     im = imgr.out_last().copy()
 
     # Self-cal + re-image with amplitudes
-    obs_sc = eh.self_cal.self_cal(obs, im, method="both", ttype="direct", processes=1)
+    obs_sc = eh.self_cal.self_cal(obs, im, method="both", ttype="nfft", processes=1)
     imgr_sc = eh.imager.Imager(
         obs_sc, im.blur_circ(10 * eh.RADPERUAS), prior,
         data_term={"amp": 1, "cphase": 1},
         reg_term={"tv": 2, "flux": 100, "cm": 50},
-        maxit=300, ttype="direct",
+        maxit=300, ttype="nfft",
     )
     imgr_sc.make_image_I(grads=True, show_updates=False)
     im = imgr_sc.out_last().copy()
 
     # Second self-cal round
-    obs_sc2 = eh.self_cal.self_cal(obs_sc, im, method="both", ttype="direct", processes=1)
+    obs_sc2 = eh.self_cal.self_cal(obs_sc, im, method="both", ttype="nfft", processes=1)
     imgr_f = eh.imager.Imager(
         obs_sc2, im.blur_circ(5 * eh.RADPERUAS), prior,
         data_term={"amp": 1, "cphase": 1},
         reg_term={"tv": 2, "flux": 100, "cm": 50},
-        maxit=300, ttype="direct",
+        maxit=300, ttype="nfft",
     )
     imgr_f.make_image_I(grads=True, show_updates=False)
     return imgr_f, imgr_f.out_last().copy()
@@ -115,7 +115,7 @@ def image_polarization(imgr, seed=None):
         obs, im_I.blur_circ(15 * eh.RADPERUAS), prior,
         data_term={"amp": 1, "cphase": 1},
         reg_term={"tv": 1, "flux": 100, "cm": 50},
-        maxit=500, ttype="direct",
+        maxit=500, ttype="nfft",
     )
     if seed is not None:
         np.random.seed(seed)

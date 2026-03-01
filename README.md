@@ -69,7 +69,9 @@ data/m87/hops_data/
 
 **Download EHT M87 data:**
 - [EHT Data Portal](https://eventhorizontelescope.org/for-astronomers/data)
-- [2017 M87 Polarimetric Data (GitHub)](https://github.com/eventhorizontelescope/2021-D01-02)
+- [2017 M87 Polarimetric Data Release](https://github.com/eventhorizontelescope/2021-D01-02)
+
+**Note:** The script expects data organized by observation day (April05, April06, April10, April11) with separate lo/hi band UVFITS files. You may need to reorganize the downloaded data to match the expected structure shown above.
 
 ## Background
 
