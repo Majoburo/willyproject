@@ -1,0 +1,13 @@
+[project]
+name = "willyproject"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ehtim>=1.2.10",
+    "matplotlib>=3.10.8",
+    "nfft>=0.1",
+    "numpy>=2.4.2",
+    "pynfft3>=0.2.2",
+]
