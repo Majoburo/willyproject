@@ -60,12 +60,13 @@ ALL_BANDS = ["lo", "hi"]
 
 NPIX           = 160
 NOISE_RESCALE  = 2.0
-SYSTEMATIC_NOISE = 0.02
+SYSTEMATIC_NOISE = 0.01      # lowered from 0.02 for tighter constraints
 ANNULUS_HW_UAS = 5.0
 NPHI           = 360
 P_MASK_FRAC    = 0.05
 C_WINDINGS     = [-2, -1, 0, 1, 2]
 C_RANGE        = range(-3, 4)
+N_SEEDS        = 3            # random seeds per winding for robustness
 
 
 # ── Load data ─────────────────────────────────────────────────────
@@ -96,6 +97,14 @@ def load_and_prepare(day, band, cfg, frame_sec=None):
 
 
 # ── Image Stokes I ────────────────────────────────────────────────
+def recenter(im):
+    """Shift image so its intensity centroid is at (0,0)."""
+    cx, cy = im.centroid()
+    shift_x = int(round(cx / im.psize))
+    shift_y = int(round(cy / im.psize))
+    return im.shift([shift_y, shift_x])
+
+
 def image_stokes_I(obs, cfg):
     fov = cfg["fov_uas"] * eh.RADPERUAS
     prior = eh.image.make_square(obs, NPIX, fov)
@@ -108,25 +117,25 @@ def image_stokes_I(obs, cfg):
         # then self-cal before using amplitudes
         imgr = eh.imager.Imager(obs_I, prior, prior,
             data_term={"logcamp": 1},
-            reg_term={"simple": 1, "flux": 100, "cm": 50},
+            reg_term={"simple": 1, "flux": 100, "cm": 500},
             maxit=300, ttype="nfft")
         imgr.make_image_I(grads=True, show_updates=False)
-        im = imgr.out_last().copy()
+        im = recenter(imgr.out_last().copy())
 
         imgr.init_next = im.blur_circ(20*eh.RADPERUAS)
-        imgr.reg_term_next = {"tv": 1, "flux": 100, "cm": 50}
+        imgr.reg_term_next = {"tv": 1, "flux": 100, "cm": 500}
         imgr.make_image_I(grads=True, show_updates=False)
-        im = imgr.out_last().copy()
+        im = recenter(imgr.out_last().copy())
 
         for blur in [10, 5]:
             obs_sc = eh.self_cal.self_cal(obs, im, method="both",
                                           ttype="nfft", processes=1)
             imgr_sc = eh.imager.Imager(obs_sc, im.blur_circ(blur*eh.RADPERUAS), prior,
                 data_term={"amp": 1, "logcamp": 1},
-                reg_term={"tv": 2, "flux": 100, "cm": 50},
+                reg_term={"tv": 2, "flux": 100, "cm": 500},
                 maxit=300, ttype="nfft")
             imgr_sc.make_image_I(grads=True, show_updates=False)
-            im = imgr_sc.out_last().copy()
+            im = recenter(imgr_sc.out_last().copy())
             obs = obs_sc
         return imgr_sc, im
 
@@ -134,23 +143,23 @@ def image_stokes_I(obs, cfg):
         # Pre-self-calibrated: use amplitudes directly
         imgr = eh.imager.Imager(obs_I, prior, prior,
             data_term={"amp": 1, "cphase": 1},
-            reg_term={"simple": 1, "flux": 100, "cm": 50},
+            reg_term={"simple": 1, "flux": 100, "cm": 500},
             maxit=300, ttype="nfft")
         imgr.make_image_I(grads=True, show_updates=False)
-        im = imgr.out_last().copy()
+        im = recenter(imgr.out_last().copy())
 
         imgr.init_next = im.blur_circ(10*eh.RADPERUAS)
-        imgr.reg_term_next = {"tv": 2, "flux": 100, "cm": 50}
+        imgr.reg_term_next = {"tv": 2, "flux": 100, "cm": 500}
         imgr.make_image_I(grads=True, show_updates=False)
-        im = imgr.out_last().copy()
+        im = recenter(imgr.out_last().copy())
 
         imgr.init_next = im.blur_circ(5*eh.RADPERUAS)
         imgr.make_image_I(grads=True, show_updates=False)
-        return imgr, imgr.out_last().copy()
+        return imgr, recenter(imgr.out_last().copy())
 
 
 # ── Image polarization ────────────────────────────────────────────
-def set_evpa_winding(im, n, pol_frac=0.2):
+def set_evpa_winding(im, n, pol_frac=0.2, seed=None):
     """Set Q/U to EVPA = n·φ pattern as optimizer starting point."""
     ny, nx = im.ydim, im.xdim
     y, x = np.mgrid[0:ny, 0:nx]
@@ -162,19 +171,26 @@ def set_evpa_winding(im, n, pol_frac=0.2):
     P = pol_frac * np.clip(I_2d, 0, None)
     chi = n * phi
 
+    # Add random EVPA perturbation per seed for diverse starting points
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        chi = chi + 0.3 * rng.standard_normal((ny, nx))
+
     im_out = im.copy()
     im_out.qvec = (P * np.cos(2*chi)).ravel()
     im_out.uvec = (P * np.sin(2*chi)).ravel()
     return im_out
 
 
-def image_polarization(imgr, im_I, winding=None, seed=None, use_pvis=False):
-    """Image Q,U using gain-robust 'm' data term with explicit winding init."""
+def image_polarization(imgr, im_I, winding=None, seed=None):
+    """Image Q,U using gain-robust 'm' data term with explicit winding init.
+    Round 3 adds gentle pvis (weight 0.1 vs m=5) as convergence stabilizer.
+    """
     prior = imgr.prior_next
     res = imgr.obs_next.res()
 
     if winding is not None:
-        init_im = set_evpa_winding(im_I.copy(), winding)
+        init_im = set_evpa_winding(im_I.copy(), winding, seed=seed)
     else:
         if seed is not None:
             np.random.seed(seed)
@@ -197,79 +213,22 @@ def image_polarization(imgr, im_I, winding=None, seed=None, use_pvis=False):
     imgr.reg_term_next = {"hw": 1, "ptv": 1}
     imgr.make_image_P(grads=True, show_updates=False)
 
-    # Optional round 3: gentle pvis stabilizer
-    if use_pvis:
-        imgr.init_next = imgr.out_last().blur_circ(0.5*res, 0.5*res)
-        imgr.prior_next = imgr.init_next
-        imgr.transform_next = "mcv"
-        imgr.dat_term_next = {"m": 5, "pvis": 0.1}
-        imgr.reg_term_next = {"hw": 1, "ptv": 1}
-        imgr.make_image_P(grads=True, show_updates=False)
+    # Round 3: gentle pvis stabilizer (0.1 vs m=5 ≈ 2% weight)
+    imgr.init_next = imgr.out_last().blur_circ(0.5*res, 0.5*res)
+    imgr.prior_next = imgr.init_next
+    imgr.transform_next = "mcv"
+    imgr.dat_term_next = {"m": 5, "pvis": 5}
+    imgr.reg_term_next = {"hw": 1, "ptv": 1}
+    imgr.make_image_P(grads=True, show_updates=False)
 
     return imgr.out_last().copy()
 
 
 # ── Find ring center ──────────────────────────────────────────────
 def find_ring_center(im, cfg):
-    """Find ring center by minimizing ring diameter variance (rex algorithm).
-
-    Reimplemented from ehtim.features.rex.findCenter with
-    RegularGridInterpolator (interp2d was removed in SciPy 1.14).
-    """
-    from scipy.interpolate import RegularGridInterpolator
-    from scipy.optimize import brute
-
+    """Return (0, 0, r0) — image is already recentered by recenter()."""
     r_uas = cfg["ring_r_uas"]
-    rmin_search, rmax_search = r_uas - 10, r_uas + 10
-    nrays, nrs = 25, 50
-
-    imarr = im.imvec.reshape(im.ydim, im.xdim)[::-1]
-    xs = np.arange(im.xdim) * im.psize / eh.RADPERUAS   # µas
-    ys = np.arange(im.ydim) * im.psize / eh.RADPERUAS
-
-    interp = RegularGridInterpolator((ys, xs), imarr,
-                                     method="linear", bounds_error=False,
-                                     fill_value=0.0)
-
-    rs = np.linspace(0, rmax_search, nrs)
-    dr = rs[1] - rs[0]
-    thetas = np.linspace(0, 2 * np.pi, nrays, endpoint=False)
-
-    def obj(pos):
-        x0, y0 = pos
-        diameters = []
-        for th in thetas:
-            xxs = x0 - rs * np.sin(th)
-            yys = y0 + rs * np.cos(th)
-            prof = interp(np.column_stack([yys, xxs]))
-            pkpos = np.argmax(prof)
-            pk = rs[pkpos]
-            if 0 < pkpos < nrs - 1:
-                a, b, c = prof[pkpos - 1], prof[pkpos], prof[pkpos + 1]
-                denom = a - 2 * b + c
-                if denom != 0:
-                    shift = 0.5 * (a - c) / denom
-                    pk = pk + shift * dr
-            diameters.append(2 * abs(pk))
-        mean, std = np.mean(diameters), np.std(diameters)
-        if mean < rmin_search or mean > rmax_search:
-            return np.inf
-        return std / mean
-
-    fov_frac = 0.15
-    fovx = im.fovx() / eh.RADPERUAS
-    fovy = im.fovy() / eh.RADPERUAS
-    res = brute(obj, ranges=(
-        ((0.5 - fov_frac) * fovx, (0.5 + fov_frac) * fovx),
-        ((0.5 - fov_frac) * fovy, (0.5 + fov_frac) * fovy)),
-        Ns=15)
-
-    x0_uas, y0_uas = res
-    # Convert from pixel-corner µas to image-center-relative µas
-    x0_uas -= fovx / 2
-    y0_uas -= fovy / 2
-    print(f"  Ring center: ({x0_uas:.1f}, {y0_uas:.1f}) µas")
-    return x0_uas * eh.RADPERUAS, y0_uas * eh.RADPERUAS, r_uas * eh.RADPERUAS
+    return 0.0, 0.0, r_uas * eh.RADPERUAS
 
 
 # ── Extract P(φ) on annulus ───────────────────────────────────────
@@ -279,7 +238,7 @@ def extract_P_of_phi(im, x0, y0, r0):
     psize = im.psize
 
     x = (np.arange(nx) - (nx-1)/2.0) * psize
-    y = (np.arange(ny) - (ny-1)/2.0) * psize
+    y = ((ny-1)/2.0 - np.arange(ny)) * psize   # row 0 = +Dec = +y
     X, Y = np.meshgrid(x, y)
 
     R = np.sqrt((X-x0)**2 + (Y-y0)**2)
@@ -372,9 +331,9 @@ def fmt_post(posterior, top_n=3):
 def plot_results(im, x0, y0, r0, phi, P, good, C_val, label):
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     fov = im.fovx() / eh.RADPERUAS
-    ext = [-fov/2, fov/2, -fov/2, fov/2]
+    ext = [fov/2, -fov/2, -fov/2, fov/2]
 
-    axes[0].imshow(im.imarr(), origin="lower", cmap="afmhot", extent=ext)
+    axes[0].imshow(im.imarr()[::-1], origin="lower", cmap="afmhot", extent=ext)
     theta = np.linspace(0, 2*np.pi, 256)
     hw = ANNULUS_HW_UAS * eh.RADPERUAS
     for r in [r0-hw, r0+hw]:
@@ -397,7 +356,7 @@ def plot_results(im, x0, y0, r0, phi, P, good, C_val, label):
 
 
 # ── Run one observation ──────────────────────────────────────────
-def run_one(day, band, cfg, frame_sec=None, windings=C_WINDINGS, use_pvis=False):
+def run_one(day, band, cfg, frame_sec=None, windings=C_WINDINGS):
     label = f"{day}_{band}"
     print(f"\n{'='*60}\n  {label}\n{'='*60}")
 
@@ -421,28 +380,36 @@ def run_one(day, band, cfg, frame_sec=None, windings=C_WINDINGS, use_pvis=False)
             traceback.print_exc()
             continue
 
+        x0, y0, r0 = find_ring_center(im_I, cfg)
+
         basin_chi2 = {}
+        best_per_basin = {}   # basin → (chi2, im_pol, C_val)
         for n in windings:
-            try:
-                im_pol = image_polarization(imgr, im_I, winding=n, use_pvis=use_pvis)
-                x0, y0, r0 = find_ring_center(im_pol, cfg)
-                phi, P, good = extract_P_of_phi(im_pol, x0, y0, r0)
-                C_val = compute_C(phi, P, good)
-                chi2_m = compute_chi2_m(im_pol, obs)
-            except Exception as e:
-                print(f"    w={n:+d}: FAILED ({e})")
-                continue
+            for seed_i in range(N_SEEDS):
+                try:
+                    im_pol = image_polarization(imgr, im_I, winding=n,
+                                                seed=seed_i)
+                    phi, P, good = extract_P_of_phi(im_pol, x0, y0, r0)
+                    C_val = compute_C(phi, P, good)
+                    chi2_m = compute_chi2_m(im_pol, obs)
+                except Exception as e:
+                    print(f"    w={n:+d} s{seed_i}: FAILED ({e})")
+                    continue
 
-            C_int = int(np.round(C_val))
-            print(f"    w={n:+d}: C={C_val:+.3f} → basin {C_int:+d}  "
-                  f"χ²_m={chi2_m:.3f}  mL={im_pol.lin_polfrac()*100:.1f}%")
+                C_int = int(np.round(C_val))
+                tag = f"w={n:+d} s{seed_i}"
+                print(f"    {tag}: C={C_val:+.3f} → basin {C_int:+d}  "
+                      f"χ²_m={chi2_m:.3f}  mL={im_pol.lin_polfrac()*100:.1f}%")
 
-            suffix = f"{label}_f{fi}_w{n:+d}" if len(frames) > 1 else f"{label}_w{n:+d}"
+                if C_int not in basin_chi2 or chi2_m < basin_chi2[C_int]:
+                    basin_chi2[C_int] = chi2_m
+                    best_per_basin[C_int] = (chi2_m, im_pol, C_val, phi, P, good)
+
+        # Save & plot only the best image per basin
+        for C_int, (chi2_m, im_pol, C_val, phi, P, good) in best_per_basin.items():
+            suffix = f"{label}_f{fi}_C{C_int:+d}" if len(frames) > 1 else f"{label}_C{C_int:+d}"
             plot_results(im_pol, x0, y0, r0, phi, P, good, C_val, suffix)
             im_pol.save_fits(str(OUT_DIR / f"{suffix}_pol.fits"))
-
-            if C_int not in basin_chi2 or chi2_m < basin_chi2[C_int]:
-                basin_chi2[C_int] = chi2_m
 
         if basin_chi2:
             fp = posterior_from_chi2(basin_chi2)
@@ -482,7 +449,6 @@ if __name__ == "__main__":
     parser.add_argument("--frame-sec", type=float, default=None,
                         help="Frame duration in seconds (0=full obs). "
                              "Default: per-source setting.")
-    parser.add_argument("--use-pvis", action="store_true")
     args = parser.parse_args()
 
     cfg = SOURCES[args.source]
@@ -494,8 +460,7 @@ if __name__ == "__main__":
         for band in bands:
             try:
                 results.append(run_one(day, band, cfg,
-                                       frame_sec=args.frame_sec,
-                                       use_pvis=args.use_pvis))
+                                       frame_sec=args.frame_sec))
             except Exception as e:
                 print(f"  FAILED {day} {band}: {e}")
 
