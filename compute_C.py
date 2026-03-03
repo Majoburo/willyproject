@@ -15,14 +15,11 @@ Usage:
 """
 
 import argparse
-from collections import Counter
 import ehtim as eh
 import numpy as np
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy.ndimage import gaussian_filter
-from scipy.optimize import minimize
 
 # ── Source configurations ──────────────────────────────────────────
 SOURCES = {
@@ -34,8 +31,7 @@ SOURCES = {
         "glob_fallback": "{day}/*_{doy}_{band}_hops_ALMArot.uvfits",
         "zbl":          0.6,    # Jy
         "fov_uas":      128.0,
-        "ring_rmin_uas": 15.0,
-        "ring_rmax_uas": 35.0,
+        "ring_r_uas":   21.0,   # photon ring radius (fixed by BH mass)
         "avg_time":     120.0,  # s — source is static
         "frame_sec":    0,      # no framing: one image per night
         "deblur":       False,
@@ -49,8 +45,7 @@ SOURCES = {
         "glob_fallback": None,
         "zbl":          2.4,    # Jy
         "fov_uas":      200.0,
-        "ring_rmin_uas": 10.0,
-        "ring_rmax_uas": 30.0,
+        "ring_r_uas":   25.0,   # photon ring radius (fixed by BH mass)
         "avg_time":     60.0,   # s — shorter; source varies on ~20s timescale
         "frame_sec":    1800,   # 30-min frames by default
         "deblur":       True,   # interstellar scattering must be removed
@@ -63,7 +58,7 @@ SOURCES = {
 OUT_DIR = Path("output"); OUT_DIR.mkdir(exist_ok=True)
 ALL_BANDS = ["lo", "hi"]
 
-NPIX           = 64
+NPIX           = 160
 NOISE_RESCALE  = 2.0
 SYSTEMATIC_NOISE = 0.02
 ANNULUS_HW_UAS = 5.0
@@ -108,12 +103,13 @@ def image_stokes_I(obs, cfg):
     obs_I = obs.rescale_noise(NOISE_RESCALE)
 
     if cfg["selfcal"]:
-        # Not pre-self-calibrated: start with closure quantities only,
+        # Not pre-self-calibrated: start with closure amplitudes only
+        # (skip cphase — bispectra computation fails on some short frames),
         # then self-cal before using amplitudes
         imgr = eh.imager.Imager(obs_I, prior, prior,
-            data_term={"cphase": 1, "logcamp": 1},
+            data_term={"logcamp": 1},
             reg_term={"simple": 1, "flux": 100, "cm": 50},
-            maxit=300, ttype="direct")
+            maxit=300, ttype="nfft")
         imgr.make_image_I(grads=True, show_updates=False)
         im = imgr.out_last().copy()
 
@@ -124,11 +120,11 @@ def image_stokes_I(obs, cfg):
 
         for blur in [10, 5]:
             obs_sc = eh.self_cal.self_cal(obs, im, method="both",
-                                          ttype="direct", processes=1)
+                                          ttype="nfft", processes=1)
             imgr_sc = eh.imager.Imager(obs_sc, im.blur_circ(blur*eh.RADPERUAS), prior,
-                data_term={"amp": 1, "cphase": 1},
+                data_term={"amp": 1, "logcamp": 1},
                 reg_term={"tv": 2, "flux": 100, "cm": 50},
-                maxit=300, ttype="direct")
+                maxit=300, ttype="nfft")
             imgr_sc.make_image_I(grads=True, show_updates=False)
             im = imgr_sc.out_last().copy()
             obs = obs_sc
@@ -139,7 +135,7 @@ def image_stokes_I(obs, cfg):
         imgr = eh.imager.Imager(obs_I, prior, prior,
             data_term={"amp": 1, "cphase": 1},
             reg_term={"simple": 1, "flux": 100, "cm": 50},
-            maxit=300, ttype="direct")
+            maxit=300, ttype="nfft")
         imgr.make_image_I(grads=True, show_updates=False)
         im = imgr.out_last().copy()
 
@@ -215,37 +211,9 @@ def image_polarization(imgr, im_I, winding=None, seed=None, use_pvis=False):
 
 # ── Find ring center ──────────────────────────────────────────────
 def find_ring_center(im, cfg):
-    I = im.imarr()
-    ny, nx = I.shape
-    psize = im.psize
-    sig = 3*eh.RADPERUAS / psize
-    I_s = gaussian_filter(I, sig) if sig > 0.5 else I
-
-    x = (np.arange(nx) - (nx-1)/2.0) * psize
-    y = (np.arange(ny) - (ny-1)/2.0) * psize
-    X, Y = np.meshgrid(x, y)
-
-    m = I_s > 0.1*I_s.max()
-    x0 = np.average(X[m], weights=I_s[m]) if m.any() else 0.0
-    y0 = np.average(Y[m], weights=I_s[m]) if m.any() else 0.0
-
-    rmin = cfg["ring_rmin_uas"]*eh.RADPERUAS
-    rmax = cfg["ring_rmax_uas"]*eh.RADPERUAS
-
-    def neg_ring(xy):
-        R = np.sqrt((X-xy[0])**2 + (Y-xy[1])**2)
-        mask = (R >= rmin) & (R <= rmax)
-        return -np.mean(I_s[mask]) if mask.any() else 1e30
-
-    x0, y0 = minimize(neg_ring, [x0, y0], method="Nelder-Mead").x
-
-    R = np.sqrt((X-x0)**2 + (Y-y0)**2)
-    edges = np.linspace(rmin, rmax, 101)
-    centers = 0.5*(edges[:-1] + edges[1:])
-    profile = [np.mean(I_s[(R >= edges[j]) & (R < edges[j+1])])
-               if ((R >= edges[j]) & (R < edges[j+1])).any() else 0
-               for j in range(100)]
-    return x0, y0, centers[np.argmax(profile)]
+    # Ring center fixed at (0,0) by the cm regularizer during imaging.
+    # Ring radius fixed by black hole mass — not a free parameter.
+    return 0.0, 0.0, cfg["ring_r_uas"] * eh.RADPERUAS
 
 
 # ── Extract P(φ) on annulus ───────────────────────────────────────
@@ -294,7 +262,7 @@ def compute_C(phi, P, good):
 
 # ── Compute χ²_m for a polarimetric image ────────────────────────
 def compute_chi2_m(im_pol, obs):
-    obs_model = im_pol.observe_same(obs, ttype="direct", add_th_noise=False)
+    obs_model = im_pol.observe_same(obs, ttype="nfft", add_th_noise=False)
     m_d = (obs.data["qvis"] + 1j*obs.data["uvis"]) / obs.data["vis"]
     m_m = (obs_model.data["qvis"] + 1j*obs_model.data["uvis"]) / obs_model.data["vis"]
     sigma_m = obs.data["sigma"] / np.abs(obs.data["vis"])

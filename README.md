@@ -46,12 +46,119 @@ python compute_C.py --nseeds 10
 
 Requires Python 3.11+ and the EHT imaging library (`ehtim`).
 
+### Python packages
+
 ```bash
 # Using uv (recommended)
 uv sync
 
 # Or with pip
 pip install ehtim numpy scipy matplotlib astropy h5py pandas networkx
+```
+
+### NFFT (optional but recommended)
+
+The NFFT library enables fast non-uniform FFTs (`ttype="nfft"`) in ehtim,
+which is significantly faster than `ttype="direct"` and more accurate than
+`ttype="fast"` for polarimetric imaging. Without it, polarimetric imaging
+is limited to `ttype="direct"`.
+
+#### macOS (Apple Silicon)
+
+GCC has an internal compiler error with NFFT's OpenMP code on ARM macOS.
+Use Clang with Homebrew's `libomp` instead.
+
+**1. Install dependencies:**
+
+```bash
+brew install fftw libomp
+```
+
+**2. Build and install the NFFT C library:**
+
+```bash
+cd /tmp
+curl -L https://github.com/NFFT/nfft/releases/download/3.5.3/nfft-3.5.3.tar.gz -o nfft-3.5.3.tar.gz
+tar xzf nfft-3.5.3.tar.gz
+cd nfft-3.5.3
+./configure --enable-all --enable-openmp \
+  --with-fftw3=$(brew --prefix fftw) \
+  CC=clang \
+  CFLAGS="-I$(brew --prefix fftw)/include -I$(brew --prefix libomp)/include -Xpreprocessor -fopenmp" \
+  LDFLAGS="-L$(brew --prefix fftw)/lib -L$(brew --prefix libomp)/lib -lomp" \
+  LIBS="-lfftw3_threads"
+make -j$(sysctl -n hw.ncpu)
+sudo make install
+```
+
+**3. Build and install pyNFFT (patched for Cython 3 / Python 3.11+):**
+
+The upstream `pynfft` package is incompatible with modern Python/Cython.
+Clone it and apply three fixes before building:
+
+```bash
+cd /tmp
+git clone https://github.com/pyNFFT/pyNFFT.git
+cd pyNFFT
+```
+
+**Fix 1 — Cython 3 relative imports.** In `pynfft/nfft.pxd`, change:
+```
+from cnfft3 cimport nfft_plan
+```
+to:
+```
+from pynfft.cnfft3 cimport nfft_plan
+```
+
+In `pynfft/nfft.pyx`, change:
+```
+from cnfft3 cimport *
+```
+to:
+```
+from pynfft.cnfft3 cimport *
+```
+
+**Fix 2 — nogil blocks.** In `pynfft/nfft.pyx`, Cython 3 disallows
+`&self._plan` inside `nogil` blocks. For each of the five `cdef` methods
+(`_precompute`, `_trafo`, `_trafo_direct`, `_adjoint`, `_adjoint_direct`),
+change from:
+```python
+cdef void _trafo(self):
+    with nogil:
+        nfft_trafo(&self._plan)
+```
+to:
+```python
+cdef void _trafo(self):
+    cdef nfft_plan *p = &self._plan
+    with nogil:
+        nfft_trafo(p)
+```
+
+**Fix 3 — Remove `util` extension.** In `setup.py`, delete the
+`ext_modules.append(...)` block for `pynfft.util` in both
+`get_extensions()` and `get_cython_extensions()` (it references symbols
+not present in NFFT 3.5.3).
+
+**Re-cythonize and install:**
+
+```bash
+pip install cython numpy  # build dependencies
+python -m cython pynfft/nfft.pyx
+
+CFLAGS="-I$(brew --prefix fftw)/include -I/usr/local/include" \
+LDFLAGS="-L$(brew --prefix fftw)/lib -L/usr/local/lib -L$(brew --prefix libomp)/lib \
+  -lnfft3_threads -lfftw3 -lfftw3_threads -lomp -lm" \
+pip install --no-build-isolation .
+```
+
+**Verify:**
+
+```bash
+python -c "from pynfft.nfft import NFFT; print('pynfft OK')"
+python -c "import ehtim; print('ehtim loaded')"  # should NOT print "No NFFT installed!"
 ```
 
 ## Data
