@@ -16,31 +16,78 @@ where P(φ) = Q + iU is the complex linear polarization extracted along an azimu
 
 ### `compute_C.py`
 
-Main analysis pipeline that processes EHT M87 data through the following steps:
+Main analysis pipeline that processes EHT data through the following steps:
 
-1. **Load & prepare** - Load UVFITS, flag stations, coherently average (120s), rescale noise
-2. **Image Stokes I** - Self-calibrated imaging using closure amplitudes and closure phases
-3. **Image Q,U** - Joint I+P imaging followed by polarimetric ratio imaging
-4. **Find ring center** - Optimize ring centroid from Stokes I brightness distribution
-5. **Extract P(φ)** - Sample Q+iU in annulus around detected ring
-6. **Compute C** - Integrate topological charge density
+1. **Load & prepare** — Load UVFITS, flag stations, coherently average, rescale noise
+2. **Image Stokes I** — Multi-round imaging with recentering (amp+cphase for pre-calibrated M87, logcamp+selfcal for Sgr A*)
+3. **Image Q,U** — Polarimetric imaging using gain-robust `m` data term with gentle `pvis` stabilizer, initialized with explicit EVPA winding patterns
+4. **Extract P(φ)** — Sample Q+iU in annulus at fixed ring radius (21 µas M87, 25 µas Sgr A*)
+5. **Compute C** — Phase-increment winding number: C = (1/2π) Σ arg(P[i+1]·P[i]*)
+6. **Bayesian posterior** — χ²-based posterior over integer C values across multiple winding initializations and random seeds
+
+**Supported sources:** M87 (`--source m87`) and Sgr A* (`--source sgra`).
 
 **Usage:**
 ```bash
-# Run all observation days × both frequency bands
-python compute_C.py
+# Run all M87 observation days × both frequency bands
+python compute_C.py --source m87
 
-# Single observation (April 11, low band)
-python compute_C.py --day April11 --band lo
+# Single observation
+python compute_C.py --source m87 --day April11 --band hi
 
-# Multiple random seeds for uncertainty estimation
-python compute_C.py --nseeds 10
+# Sgr A* with 30-min time frames (default)
+python compute_C.py --source sgra
 ```
 
 **Output:**
-- `output/{day}_{band}_pol.fits` - Polarimetric image cubes
-- `output/{day}_{band}.png` - Diagnostic plots (Stokes I, |P(φ)|, EVPA, ticks)
-- Console summary table with C values and statistics
+- `output/{day}_{band}_C{n}_pol.fits` — Polarimetric image per winding basin
+- `output/{day}_{band}_C{n}.png` — Diagnostic plots (Stokes I + annulus, |P(φ)|, EVPA unwrapped, EVPA ticks)
+- Console summary with per-observation and combined posteriors
+
+### `azimuthal_spectrum.py`
+
+Modular diagnostic that decomposes P(φ) into azimuthal Fourier modes to characterize the nature of the polarization structure:
+
+```
+P(φ) = Σ_m  a_m · exp(i·m·φ)
+```
+
+Two decompositions are computed:
+- **P(φ)** directly — includes brightness modulation from the asymmetric crescent
+- **exp(2iχ(φ))** — EVPA phase only, with brightness removed
+
+An FK signal (C = n) produces a peak at mode m = 2n in the exp(2iχ) spectrum. If m = +2 stands out above the noise floor, it is consistent with a coherent C = 1 winding. A flat or red spectrum indicates turbulent plasma or imaging artifacts.
+
+**Usage:**
+```bash
+# Analyze one or more polarimetric FITS files
+python azimuthal_spectrum.py output/April11_hi_C+0_pol.fits --ring-r 21
+
+# Sgr A* (different ring radius)
+python azimuthal_spectrum.py output/April06_lo_f0_C+0_pol.fits --ring-r 25
+
+# Multiple files at once
+python azimuthal_spectrum.py output/*_pol.fits --ring-r 21
+```
+
+**Library API:**
+```python
+from azimuthal_spectrum import azimuthal_power_spectrum, plot_spectrum
+modes, power_P, power_chi, a_m_P, a_m_chi = azimuthal_power_spectrum(phi, P, good)
+plot_spectrum(modes, power_P, power_chi, a_m_P, a_m_chi, "label")
+```
+
+**Output:**
+- `output/{label}_azspec.png` — 2×2 panel: P(φ) and exp(2iχ) power spectra (linear + log)
+
+### `test_synthetic.py`
+
+Synthetic validation tests. Creates ring images with known EVPA winding patterns (C = 0, 1, −1, 2), runs the extraction pipeline, and verifies that the computed C matches the input.
+
+**Usage:**
+```bash
+python test_synthetic.py
+```
 
 ## Installation
 
@@ -165,13 +212,19 @@ python -c "import ehtim; print('ehtim loaded')"  # should NOT print "No NFFT ins
 
 Expected data directory structure:
 ```
-data/m87/hops_data/
-  ├── April05/
-  ├── April06/
-  ├── April10/
-  └── April11/
-      ├── *_101_lo_hops_*.uvfits
-      └── *_101_hi_hops_*.uvfits
+data/
+├── m87/hops_data/
+│   ├── April05/
+│   ├── April06/
+│   ├── April10/
+│   └── April11/
+│       ├── *_101_lo_hops_zbl-dtcal+selfcal.uvfits
+│       └── *_101_hi_hops_zbl-dtcal+selfcal.uvfits
+└── sgra/hops_data/
+    ├── April06/
+    └── April07/
+        ├── *_097_lo_hops_*dtermcal.uvfits
+        └── *_097_hi_hops_*dtermcal.uvfits
 ```
 
 **Download EHT M87 data:**
