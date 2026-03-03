@@ -211,9 +211,65 @@ def image_polarization(imgr, im_I, winding=None, seed=None, use_pvis=False):
 
 # ── Find ring center ──────────────────────────────────────────────
 def find_ring_center(im, cfg):
-    # Ring center fixed at (0,0) by the cm regularizer during imaging.
-    # Ring radius fixed by black hole mass — not a free parameter.
-    return 0.0, 0.0, cfg["ring_r_uas"] * eh.RADPERUAS
+    """Find ring center by minimizing ring diameter variance (rex algorithm).
+
+    Reimplemented from ehtim.features.rex.findCenter with
+    RegularGridInterpolator (interp2d was removed in SciPy 1.14).
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    from scipy.optimize import brute
+
+    r_uas = cfg["ring_r_uas"]
+    rmin_search, rmax_search = r_uas - 10, r_uas + 10
+    nrays, nrs = 25, 50
+
+    imarr = im.imvec.reshape(im.ydim, im.xdim)[::-1]
+    xs = np.arange(im.xdim) * im.psize / eh.RADPERUAS   # µas
+    ys = np.arange(im.ydim) * im.psize / eh.RADPERUAS
+
+    interp = RegularGridInterpolator((ys, xs), imarr,
+                                     method="linear", bounds_error=False,
+                                     fill_value=0.0)
+
+    rs = np.linspace(0, rmax_search, nrs)
+    dr = rs[1] - rs[0]
+    thetas = np.linspace(0, 2 * np.pi, nrays, endpoint=False)
+
+    def obj(pos):
+        x0, y0 = pos
+        diameters = []
+        for th in thetas:
+            xxs = x0 - rs * np.sin(th)
+            yys = y0 + rs * np.cos(th)
+            prof = interp(np.column_stack([yys, xxs]))
+            pkpos = np.argmax(prof)
+            pk = rs[pkpos]
+            if 0 < pkpos < nrs - 1:
+                a, b, c = prof[pkpos - 1], prof[pkpos], prof[pkpos + 1]
+                denom = a - 2 * b + c
+                if denom != 0:
+                    shift = 0.5 * (a - c) / denom
+                    pk = pk + shift * dr
+            diameters.append(2 * abs(pk))
+        mean, std = np.mean(diameters), np.std(diameters)
+        if mean < rmin_search or mean > rmax_search:
+            return np.inf
+        return std / mean
+
+    fov_frac = 0.15
+    fovx = im.fovx() / eh.RADPERUAS
+    fovy = im.fovy() / eh.RADPERUAS
+    res = brute(obj, ranges=(
+        ((0.5 - fov_frac) * fovx, (0.5 + fov_frac) * fovx),
+        ((0.5 - fov_frac) * fovy, (0.5 + fov_frac) * fovy)),
+        Ns=15)
+
+    x0_uas, y0_uas = res
+    # Convert from pixel-corner µas to image-center-relative µas
+    x0_uas -= fovx / 2
+    y0_uas -= fovy / 2
+    print(f"  Ring center: ({x0_uas:.1f}, {y0_uas:.1f}) µas")
+    return x0_uas * eh.RADPERUAS, y0_uas * eh.RADPERUAS, r_uas * eh.RADPERUAS
 
 
 # ── Extract P(φ) on annulus ───────────────────────────────────────
